@@ -94,7 +94,7 @@ def _layout_valid(info):
         return False
     bound = vsize
     for rva, sz in info['ce_dds']:
-        if rva and rva >= bound:
+        if rva and rva > bound:
             return False
         if sz and sz > bound:
             return False

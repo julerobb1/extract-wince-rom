@@ -236,12 +236,104 @@ def xpress_decompress(src, out_size):
     return _lz77_core(src, out_size, nibble_sharing=True)
 
 
-def try_decompress(chunk, full_size):
+def xpress_huffman_decompress(src, out_size):
+    slen = len(src)
+    out = bytearray()
+    pos = 0
+
+    while len(out) < out_size:
+        if slen - pos < 256:
+            return None
+
+        lengths = [0] * 512
+        for i in range(256):
+            b = src[pos + i]
+            lengths[2 * i] = b & 0x0F
+            lengths[2 * i + 1] = b >> 4
+
+        decode = []
+        for bit_len in range(1, 16):
+            count = 1 << (15 - bit_len)
+            for sym in range(512):
+                if lengths[sym] == bit_len:
+                    decode.extend([sym] * count)
+        if len(decode) != 32768:
+            return None
+
+        pos += 256
+        if pos + 4 > slen:
+            return None
+        next_bits = int.from_bytes(src[pos:pos + 2], 'little') << 16
+        next_bits |= int.from_bytes(src[pos + 2:pos + 4], 'little')
+        pos += 4
+        extra_bits = 16
+        block_end = len(out) + 65536
+
+        while len(out) < block_end and len(out) < out_size:
+            sym = decode[next_bits >> 17]
+            bit_len = lengths[sym]
+            next_bits = (next_bits << bit_len) & 0xFFFFFFFF
+            extra_bits -= bit_len
+            if extra_bits < 0:
+                if pos + 2 > slen:
+                    return None
+                next_bits |= int.from_bytes(src[pos:pos + 2], 'little') << -extra_bits
+                next_bits &= 0xFFFFFFFF
+                extra_bits += 16
+                pos += 2
+
+            if sym < 256:
+                out.append(sym)
+                continue
+
+            sym -= 256
+            match_len = sym & 0x0F
+            off_bits = sym >> 4
+            if match_len == 15:
+                if pos >= slen:
+                    return None
+                match_len = src[pos]
+                pos += 1
+                if match_len == 255:
+                    if pos + 2 > slen:
+                        return None
+                    match_len = int.from_bytes(src[pos:pos + 2], 'little')
+                    pos += 2
+                    if match_len < 15:
+                        return None
+                    match_len -= 15
+                match_len += 15
+            match_len += 3
+
+            match_off = (next_bits >> (32 - off_bits)) if off_bits else 0
+            match_off += 1 << off_bits
+            next_bits = (next_bits << off_bits) & 0xFFFFFFFF
+            extra_bits -= off_bits
+            if extra_bits < 0:
+                if pos + 2 > slen:
+                    return None
+                next_bits |= int.from_bytes(src[pos:pos + 2], 'little') << -extra_bits
+                next_bits &= 0xFFFFFFFF
+                extra_bits += 16
+                pos += 2
+
+            start = len(out) - match_off
+            if start < 0:
+                return None
+            for i in range(match_len):
+                out.append(out[start + i])
+
+    return bytes(out[:out_size])
+
+
+def try_decompress(chunk, full_size, huffman=False):
     """Try IMGFS decompression; return decompressed data or None."""
     if len(chunk) == full_size:
         return chunk  # stored uncompressed
     if len(chunk) == 0:
         return None
+    if huffman:
+        return xpress_huffman_decompress(chunk, full_size)
     result = xpress_decompress(chunk, full_size)
     if len(result) == full_size:
         return result

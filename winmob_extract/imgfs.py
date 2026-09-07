@@ -179,7 +179,7 @@ def _ftl_read(data, translate, logical_addr, size):
     return bytes(result)
 
 
-def _read_index_data(data, translate, indexptr, indexsize, expected):
+def _read_index_data(data, translate, indexptr, indexsize, expected, huffman=False):
     """Read and decompress data via an index block."""
     if indexptr == 0 or indexsize == 0:
         return None
@@ -209,12 +209,10 @@ def _read_index_data(data, translate, indexptr, indexsize, expected):
         if comp_sz == full_sz:
             result.extend(chunk)
         else:
-            dec = try_decompress(chunk, full_sz)
-            if dec is not None:
-                result.extend(dec)
-            else:
-                result.extend(chunk)
-                result.extend(b'\x00' * (full_sz - comp_sz))
+            dec = try_decompress(chunk, full_sz, huffman=huffman)
+            if dec is None:
+                return None
+            result.extend(dec)
 
     return bytes(result[:expected]) if expected > 0 else bytes(result)
 
@@ -263,7 +261,10 @@ def extract_imgfs(data, output_dir, machine, attr_log=None, fs_mode='raw',
     bytesperblk = u32(data, imgfs_base + 0x24)
     ents_per_blk = (bytesperblk - 8) // direntsize
 
-    print(f"  IMGFS at 0x{imgfs_base:08X} (block={bytesperblk})")
+    huffman = bytes(data[imgfs_base + 0x2C:imgfs_base + 0x30]) == b'XPH\x00'
+
+    print(f"  IMGFS at 0x{imgfs_base:08X} (block={bytesperblk}, "
+          f"{'XPRESS Huffman' if huffman else 'XPRESS LZ77'})")
 
     base_sector, mapping = build_ftl_mapping(data, imgfs_base)
     if base_sector is not None:
@@ -328,7 +329,7 @@ def extract_imgfs(data, output_dir, machine, attr_log=None, fs_mode='raw',
             if not _valid_name(name):
                 name = f"unnamed_{eo - imgfs_base:06X}.dat"
 
-            fdata = _read_index_data(data, translate, indexptr, indexsize, file_size)
+            fdata = _read_index_data(data, translate, indexptr, indexsize, file_size, huffman)
             if fdata:
                 if not skip_fs:
                     path = os.path.join(win_dir, safe_filename(name))
@@ -369,7 +370,7 @@ def extract_imgfs(data, output_dir, machine, attr_log=None, fs_mode='raw',
                 name = f"unnamed_{eo - imgfs_base:06X}.dll"
 
             # Read module header (e32rom + o32_rom)
-            header = _read_index_data(data, translate, indexptr, indexsize, file_size)
+            header = _read_index_data(data, translate, indexptr, indexsize, file_size, huffman)
 
             # Walk adjacent SECTION entries (skip NAME entries)
             sec_data = {}
@@ -387,7 +388,7 @@ def extract_imgfs(data, output_dir, machine, attr_log=None, fs_mode='raw',
                 sisz  = u32(sraw, 0x20)
 
                 sname = _resolve_name(data, translate, sni, name_map)
-                sd = _read_index_data(data, translate, siptr, sisz, ssz)
+                sd = _read_index_data(data, translate, siptr, sisz, ssz, huffman)
                 if sd:
                     sec_data[sname] = sd
                 j += 1
